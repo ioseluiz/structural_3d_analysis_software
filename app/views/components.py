@@ -1,3 +1,4 @@
+#
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, 
                              QTextEdit, QLabel, QPushButton, QFrame, QSizePolicy, 
                              QTabWidget, QHBoxLayout, QTableWidget, QTableWidgetItem, 
@@ -7,9 +8,9 @@ from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QVector3D, QMatrix4x4,
 import numpy as np
 import pyqtgraph.opengl as gl
 from pyqtgraph.opengl import GLViewWidget
-import math # Necesario para el grid logarítmico
+import math
 
-# --- SISTEMA DE TEXTO VECTORIAL (Sin cambios) ---
+# --- SISTEMA DE TEXTO VECTORIAL ---
 VECTOR_FONT_DEFS = {
     '0': [[0,0], [1,0], [1,2], [0,2], [0,0]],
     '1': [[0.5,0], [0.5,2]],
@@ -27,6 +28,22 @@ VECTOR_FONT_DEFS = {
     '-': [[0,1], [1,1]],
     'F': [[0,0], [0,2], [1,2], [0,2], [0,1], [0.8,1]] 
 }
+
+def dist_sq_point_to_segment_2d(px, py, x1, y1, x2, y2):
+    """
+    Calcula la distancia al cuadrado desde un punto (px, py) 
+    a un segmento de línea 2D definido por (x1, y1) y (x2, y2).
+    """
+    l2 = (x1 - x2)**2 + (y1 - y2)**2
+    if l2 == 0: return (px - x1)**2 + (py - y1)**2
+    
+    t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2
+    t = max(0, min(1, t))
+    
+    proj_x = x1 + t * (x2 - x1)
+    proj_y = y1 + t * (y2 - y1)
+    
+    return (px - proj_x)**2 + (py - proj_y)**2
 
 def generate_vector_text(text, origin, scale=1.0, color=(0,0,0,1), width=1):
     points = []
@@ -63,7 +80,49 @@ def create_color_icon(color: QColor, text: str = "") -> QIcon:
         painter.end()
     return QIcon(pixmap)
 
-# --- PANELES Y WIDGETS AUXILIARES ---
+# --- FUNCIONES MATEMÁTICAS ---
+#--- Función Matemática con Debug (ponla al inicio o antes de Viewport3DWidget) ---
+def dist_sq_segment_to_ray(ray_origin, ray_dir, p1, p2):
+    """
+    Calcula distancia al cuadrado entre Segmento(p1,p2) y Rayo(origin,dir).
+    """
+    u = p2 - p1
+    v = ray_dir
+    w = ray_origin - p1
+    
+    a = QVector3D.dotProduct(u, u)
+    b = QVector3D.dotProduct(u, v)
+    c = QVector3D.dotProduct(v, v)
+    d = QVector3D.dotProduct(u, w)
+    e = QVector3D.dotProduct(v, w)
+    
+    det = a*c - b*b
+    
+    # Si son paralelos, la distancia es la del punto inicial al rayo
+    if det < 1e-6: 
+        s_closest = 0.0
+    else:
+        s_closest = (b*e - c*d) / det
+    
+    # Restringir al segmento finito [0, 1]
+    # Si el punto más cercano está fuera del segmento, clamp a los extremos
+    if s_closest < 0.0: s_closest = 0.0
+    elif s_closest > 1.0: s_closest = 1.0
+    
+    # Punto exacto en el segmento 3D
+    pt_on_segment = p1 + u * s_closest
+    
+    # Ahora buscamos el punto más cercano en el Rayo (proyección)
+    # (PuntoSeg - OrigenRayo) . DireccionRayo
+    t_closest = QVector3D.dotProduct(pt_on_segment - ray_origin, v)
+    
+    # Punto en el rayo
+    pt_on_ray = ray_origin + v * t_closest
+    
+    dist_sq = (pt_on_segment - pt_on_ray).lengthSquared()
+    return dist_sq
+
+# --- WIDGETS AUXILIARES ---
 
 class WorkTreeWidget(QWidget):
     itemSelected = pyqtSignal(str) 
@@ -141,6 +200,8 @@ class NodeTableWidget(QWidget):
         self.selectionChanged.emit(selected_ids)
 
 class ElementTableWidget(QWidget):
+    selectionChanged = pyqtSignal(list) # Señal de selección
+
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout()
@@ -150,17 +211,46 @@ class ElementTableWidget(QWidget):
         self.table.setHorizontalHeaderLabels(["Frame ID", "Node A", "Node B"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         
         layout.addWidget(QLabel("Frames Table"))
         layout.addWidget(self.table)
         self.setLayout(layout)
+        
+        self.table.itemSelectionChanged.connect(self._on_selection_change)
+        self._block_signal = False
 
     def update_data(self, elements_list):
+        self._block_signal = True
         self.table.setRowCount(len(elements_list))
         for row, elem in enumerate(elements_list):
-            self.table.setItem(row, 0, QTableWidgetItem(str(elem[0])))
+            id_item = QTableWidgetItem(str(elem[0]))
+            id_item.setData(Qt.ItemDataRole.UserRole, elem[0])
+            
+            self.table.setItem(row, 0, id_item)
             self.table.setItem(row, 1, QTableWidgetItem(str(elem[1])))
             self.table.setItem(row, 2, QTableWidgetItem(str(elem[2])))
+        self._block_signal = False
+
+    def select_rows_by_ids(self, ids_set):
+        self._block_signal = True
+        self.table.clearSelection()
+        if ids_set:
+            for row in range(self.table.rowCount()):
+                item_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                if item_id in ids_set:
+                    self.table.selectRow(row)
+        self._block_signal = False
+
+    def _on_selection_change(self):
+        if self._block_signal: return
+        selected_ids = []
+        rows = set(index.row() for index in self.table.selectedIndexes())
+        for row in rows:
+            item = self.table.item(row, 0)
+            if item:
+                selected_ids.append(item.data(Qt.ItemDataRole.UserRole))
+        self.selectionChanged.emit(selected_ids)
 
 class MaterialTableWidget(QWidget):
     def __init__(self):
@@ -242,28 +332,29 @@ class CoordStatusWidget(QFrame):
 class Viewport3DWidget(GLViewWidget):
     mouseMovedSignal = pyqtSignal(float, float, float, bool)
     nodeSelectionChanged = pyqtSignal(set)
+    frameSelectionChanged = pyqtSignal(set) # Señal de Frames
     createFrameSignal = pyqtSignal(int, int) 
 
     def __init__(self):
         super().__init__()
         self.setCameraPosition(distance=150, elevation=30, azimuth=45)
         self.setBackgroundColor('w')
-        # Habilitamos el tracking, pero gestionaremos el clic manualmente
         self.setMouseTracking(True)
 
         self.full_nodes_data = [] 
         self.full_elements_data = []
-        self.selected_ids = set()
         
-        # VISIBILITY FLAGS
+        # Sets de selección separados
+        self.selected_node_ids = set()
+        self.selected_frame_ids = set()
+        
+        # FLAGS
         self.node_ids_visible = False
         self.frame_ids_visible = False
         self.axes_visible = True
-        
         self.add_frame_mode = False 
         self.temp_first_node_id = None 
         
-        # Almacenes de Items Gráficos
         self.node_text_items = [] 
         self.frame_text_items = [] 
         self.axes_items = []
@@ -277,90 +368,66 @@ class Viewport3DWidget(GLViewWidget):
         self.addItem(self.grid)
         self.axes_items.append(self.grid)
 
-        # Dibujar Ejes X,Y,Z
         self._draw_vector_axes()
 
-        # Item para Frames (Líneas)
+        # Item para Frames Normales (Gris)
         self.frames_item = gl.GLLinePlotItem(pos=np.zeros((0,3)), color=(0.4, 0.4, 0.4, 1), width=2, mode='lines', antialias=True)
         self.addItem(self.frames_item)
 
-        # Item para Nodos (Puntos)
+        # Item para Frames Seleccionados (Rojo, más grueso)
+        self.sel_frames_item = gl.GLLinePlotItem(pos=np.zeros((0,3)), color=(1, 0, 0, 1), width=4, mode='lines', antialias=True)
+        self.addItem(self.sel_frames_item)
+        self.sel_frames_item.setVisible(False)
+
+        # Item para Nodos
         self.scatter = gl.GLScatterPlotItem(pos=np.zeros((0, 3)), size=12, color=(0, 0, 1, 1), pxMode=True)
         self.scatter.setGLOptions('translucent')
         self.addItem(self.scatter)
-
-        # --- DEBUG: Rayo Visual ---
-        # Una línea roja brillante que nos mostrará por dónde "viaja" el clic
+        
+        # --- DEBUG VISUAL (Línea Magenta) ---
         self.debug_ray_line = gl.GLLinePlotItem(pos=np.zeros((2,3)), color=(1, 0, 1, 1), width=3, antialias=True)
         self.addItem(self.debug_ray_line)
-        self.debug_ray_line.setVisible(False) # Oculto por defecto
+        self.debug_ray_line.setVisible(False)
 
     def set_add_frame_mode(self, active: bool):
         self.add_frame_mode = active
         self.temp_first_node_id = None
-        self._refresh_scatter_colors()
+        self._refresh_scene_graphics()
 
     def _draw_vector_axes(self):
         L, W = 50, 1 
-        
         xaxis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [L,0,0]]), color=(1,0,0,1), width=W, antialias=True)
         yaxis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [0,L,0]]), color=(0,0.6,0,1), width=W, antialias=True)
         zaxis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [0,0,L]]), color=(0,0,1,1), width=W, antialias=True)
-        
         self.addItem(xaxis); self.axes_items.append(xaxis)
         self.addItem(yaxis); self.axes_items.append(yaxis)
         self.addItem(zaxis); self.axes_items.append(zaxis)
         
-        txt_x = generate_vector_text("X", (L+5, 0, 0), scale=2.5, color=(1,0,0,1))
-        if txt_x: self.addItem(txt_x); self.axes_items.append(txt_x)
-        txt_y = generate_vector_text("Y", (0, L+5, 0), scale=2.5, color=(0,0.6,0,1))
-        if txt_y: self.addItem(txt_y); self.axes_items.append(txt_y)
-        txt_z = generate_vector_text("Z", (0, 0, L+5), scale=2.5, color=(0,0,1,1))
-        if txt_z: self.addItem(txt_z); self.axes_items.append(txt_z)
+        for t, o, c in [("X", (L+5,0,0), (1,0,0,1)), ("Y", (0,L+5,0), (0,0.6,0,1)), ("Z", (0,0,L+5), (0,0,1,1))]:
+            it = generate_vector_text(t, o, scale=2.5, color=c)
+            if it: self.addItem(it); self.axes_items.append(it)
 
-    # --- NUEVA LÓGICA DE GRID DINÁMICO ---
     def auto_adjust_grid(self, bounds):
-        """
-        Ajusta el tamaño del Grid y su espaciado basándose en los límites del modelo.
-        bounds: tupla (min_x, max_x, min_y, max_y, min_z, max_z)
-        """
         if not bounds: return
-
         min_x, max_x, min_y, max_y, _, _ = bounds
+        max_dim = max(max_x - min_x, max_y - min_y, 1.0)
         
-        # Calcular dimensiones del modelo
-        width = max_x - min_x
-        height = max_y - min_y
-        max_dim = max(width, height, 1.0) 
-        
-        # Grid size un poco más grande
         grid_size = max_dim * 3.0
-        if grid_size < 100: grid_size = 100 # Mínimo 100 unidades
+        if grid_size < 100: grid_size = 100
         
-        # Calcular espaciado logarítmico (1, 10, 100, 1000...)
         exponent = math.floor(math.log10(max_dim)) if max_dim > 0 else 1
         spacing = 10 ** (exponent - 1) 
-        
-        # Si el espaciado es muy denso, lo aumentamos
-        if max_dim / spacing > 20:
-            spacing *= 5
+        if max_dim / spacing > 20: spacing *= 5
             
         self.grid.setSize(grid_size, grid_size, 0)
         self.grid.setSpacing(spacing, spacing, 0)
-        
-        # Centrar el grid aproximadamente
-        center_x = (min_x + max_x) / 2
-        center_y = (min_y + max_y) / 2
-        
-        # Reseteamos transformaciones y movemos
         self.grid.resetTransform()
-        self.grid.translate(center_x, center_y, 0)
+        self.grid.translate((min_x + max_x)/2, (min_y + max_y)/2, 0)
 
-    # --- TOGGLES DE VISIBILIDAD ---
+    # --- TOGGLES ---
     def toggle_axes(self, show: bool):
         self.axes_visible = show
-        for item in self.axes_items:
-            item.setVisible(show)
+        for item in self.axes_items: item.setVisible(show)
 
     def toggle_node_ids(self, show: bool):
         self.node_ids_visible = show
@@ -370,300 +437,305 @@ class Viewport3DWidget(GLViewWidget):
         self.frame_ids_visible = show
         self._refresh_frame_labels()
     
-    # --- REFRESH LABELS ---
     def _refresh_node_labels(self):
         for item in self.node_text_items:
             try: self.removeItem(item)
             except: pass
         self.node_text_items.clear()
-
         if not self.node_ids_visible: return
-
         for node in self.full_nodes_data:
-            nid, x, y, z = node
-            txt_item = generate_vector_text(str(nid), (x+1, y, z+1), scale=0.5, color=(0,0,0,1), width=1)
-            if txt_item:
-                self.addItem(txt_item)
-                self.node_text_items.append(txt_item)
+            txt_item = generate_vector_text(str(node[0]), (node[1]+1, node[2], node[3]+1), scale=0.5, color=(0,0,0,1))
+            if txt_item: self.addItem(txt_item); self.node_text_items.append(txt_item)
 
     def _refresh_frame_labels(self):
         for item in self.frame_text_items:
             try: self.removeItem(item)
             except: pass
         self.frame_text_items.clear()
-
         if not self.frame_ids_visible: return
-        
         node_map = {n[0]: (n[1], n[2], n[3]) for n in self.full_nodes_data}
-
         for elem in self.full_elements_data:
-            eid, n1, n2 = elem
-            if n1 in node_map and n2 in node_map:
-                c1 = node_map[n1]
-                c2 = node_map[n2]
-                
-                mid_x = (c1[0] + c2[0]) / 2.0
-                mid_y = (c1[1] + c2[1]) / 2.0
-                mid_z = (c1[2] + c2[2]) / 2.0
-                
-                txt_item = generate_vector_text(f"F{eid}", (mid_x, mid_y, mid_z + 1), scale=0.5, color=(0,0,0.5,1), width=1)
-                if txt_item:
-                    self.addItem(txt_item)
-                    self.frame_text_items.append(txt_item)
+            if elem[1] in node_map and elem[2] in node_map:
+                c1, c2 = node_map[elem[1]], node_map[elem[2]]
+                mid = ((c1[0]+c2[0])/2, (c1[1]+c2[1])/2, (c1[2]+c2[2])/2)
+                txt = generate_vector_text(f"F{elem[0]}", (mid[0], mid[1], mid[2]+1), scale=0.5, color=(0,0,0.5,1))
+                if txt: self.addItem(txt); self.frame_text_items.append(txt)
 
     def update_scene_data(self, nodes_data, elements_data):
         self.full_nodes_data = nodes_data
         self.full_elements_data = elements_data
         
-        current_ids = set(n[0] for n in nodes_data)
-        self.selected_ids = self.selected_ids.intersection(current_ids)
+        # Limpiar IDs huérfanos
+        curr_n = set(n[0] for n in nodes_data)
+        self.selected_node_ids = self.selected_node_ids.intersection(curr_n)
+        curr_f = set(e[0] for e in elements_data)
+        self.selected_frame_ids = self.selected_frame_ids.intersection(curr_f)
         
-        self._refresh_scatter_colors()
+        self._refresh_scene_graphics()
         self._refresh_node_labels()
         self._refresh_frame_labels()
-        
-        lines_pts = []
-        node_map = {n[0]: (n[1], n[2], n[3]) for n in nodes_data}
-        
-        for elem in elements_data:
-            nid1, nid2 = elem[1], elem[2]
-            if nid1 in node_map and nid2 in node_map:
-                lines_pts.append(list(node_map[nid1]))
-                lines_pts.append(list(node_map[nid2]))
-        
-        if lines_pts:
-            self.frames_item.setData(pos=np.array(lines_pts, dtype=np.float32))
-        else:
-            self.frames_item.setData(pos=np.zeros((0,3)))
 
-    def set_selection(self, ids_list):
-        self.selected_ids = set(ids_list)
-        self._refresh_scatter_colors()
+    def set_selection(self, node_ids=None, frame_ids=None):
+        if node_ids is not None: self.selected_node_ids = set(node_ids)
+        if frame_ids is not None: self.selected_frame_ids = set(frame_ids)
+        self._refresh_scene_graphics()
 
-    def _refresh_scatter_colors(self):
+    def _refresh_scene_graphics(self):
+        # Nodos
         if not self.full_nodes_data:
-            self.scatter.setData(pos=np.zeros((0, 3)), color=(0,0,0,0))
-            return
-
-        coords = np.array([n[1:] for n in self.full_nodes_data], dtype=np.float32)
-        # Color azul por defecto
-        colors = np.array([[0, 0, 1, 1] for _ in range(len(coords))], dtype=np.float32)
+            self.scatter.setData(pos=np.zeros((0,3)), color=(0,0,0,0))
+        else:
+            coords = np.array([n[1:] for n in self.full_nodes_data], dtype=np.float32)
+            colors = np.array([[0,0,1,1] for _ in range(len(coords))], dtype=np.float32)
+            for i, n in enumerate(self.full_nodes_data):
+                if n[0] in self.selected_node_ids: colors[i] = [1,0,0,1]
+                elif n[0] == self.temp_first_node_id: colors[i] = [0,1,0,1]
+            self.scatter.setData(pos=coords, size=12, color=colors, pxMode=True)
+            
+        # Frames
+        node_map = {n[0]: (n[1],n[2],n[3]) for n in self.full_nodes_data}
+        norm_lines, sel_lines = [], []
         
-        for i, node in enumerate(self.full_nodes_data):
-            nid = node[0]
-            if nid in self.selected_ids:
-                colors[i] = [1, 0, 0, 1] # Rojo para selección
-            elif nid == self.temp_first_node_id:
-                colors[i] = [0, 1, 0, 1] # Verde para inicio de frame
+        for e in self.full_elements_data:
+            if e[1] in node_map and e[2] in node_map:
+                pts = [list(node_map[e[1]]), list(node_map[e[2]])]
+                if e[0] in self.selected_frame_ids: sel_lines.extend(pts)
+                else: norm_lines.extend(pts)
+                
+        self.frames_item.setData(pos=np.array(norm_lines, dtype=np.float32) if norm_lines else np.zeros((0,3)))
         
-        self.scatter.setData(pos=coords, size=12, color=colors, pxMode=True)
+        if sel_lines:
+            self.sel_frames_item.setData(pos=np.array(sel_lines, dtype=np.float32))
+            self.sel_frames_item.setVisible(True)
+        else:
+            self.sel_frames_item.setVisible(False)
         self.update()
 
-    # --- LÓGICA DE RAY-CASTING Y EVENTOS ---
-    
+    # --- RAY CASTING ---
+
     def _get_mouse_ray(self, x, y):
         """
-        Calcula el rayo en coordenadas del mundo.
-        Intenta obtener la matriz de proyección EXACTA del widget para evitar errores de Aspect Ratio.
+        Calcula el rayo usando 'Unproject' puro en ambos planos (Near y Far).
+        Es más robusto que usar cameraPosition().
         """
         w = self.width()
         h = self.height()
-        if w <= 0 or h <= 0: 
-            return QVector3D(0,0,0), QVector3D(0,0,1)
+        if w <= 0 or h <= 0: return QVector3D(0,0,0), QVector3D(0,0,1)
 
-        # 1. Matriz de Vista (Siempre es estándar)
+        # 1. Obtener matrices
         m_view = self.viewMatrix()
-
-        # 2. Matriz de Proyección (INTENTO ROBUSTO)
-        # Intentamos llamar a projectionMatrix adaptándonos a la firma del método
+        
+        # Intentar obtener la matriz de proyección exacta del widget
         m_proj = None
         try:
-            # Intento 1: Estándar (sin argumentos o por defecto)
             m_proj = self.projectionMatrix()
         except TypeError:
             try:
-                # Intento 2: Firma con region y viewport (Tu caso probable)
-                # region=(x, y, w, h), viewport=(x, y, w, h)
                 r = (0, 0, w, h)
                 m_proj = self.projectionMatrix(region=r, viewport=r)
-            except Exception as e:
-                print(f"Error obteniendo projectionMatrix: {e}")
+            except Exception: pass
         
-        # 3. Fallback Manual (Solo si todo falla)
         if m_proj is None:
-            print("WARNING: Usando cálculo manual de matriz (puede ser impreciso)")
             m_proj = QMatrix4x4()
             m_proj.perspective(self.opts['fov'], w / h, 0.1, 5000.0)
-        
-        # 4. Inversión MVP
+            
+        # 2. Invertir MVP
         mvp = m_proj * m_view
-        inv_mvp, invertible = mvp.inverted()
+        inv_mvp, ok = mvp.inverted()
+        if not ok: return QVector3D(0,0,0), QVector3D(0,0,1)
         
-        if not invertible:
-            return QVector3D(0,0,0), QVector3D(0,0,1)
-
-        # 5. Cálculo del Rayo
+        # 3. Coordenadas Normalizadas
         x_ndc = (2.0 * x) / w - 1.0
         y_ndc = 1.0 - (2.0 * y) / h 
         
-        ray_origin = self.cameraPosition()
+        # 4. Unproject de ambos extremos del frustum
+        # Plano Cercano (Near Plane, z = -1.0 en NDC) -> Aquí empieza el rayo realmente
+        pt_near_ndc = QVector3D(x_ndc, y_ndc, -1.0)
+        pt_near_world = inv_mvp.map(pt_near_ndc)
         
-        point_on_far_plane_ndc = QVector3D(x_ndc, y_ndc, 1.0)
-        point_on_far_plane_world = inv_mvp.map(point_on_far_plane_ndc)
+        # Plano Lejano (Far Plane, z = 1.0 en NDC)
+        pt_far_ndc = QVector3D(x_ndc, y_ndc, 1.0)
+        pt_far_world = inv_mvp.map(pt_far_ndc)
         
-        ray_dir = (point_on_far_plane_world - ray_origin).normalized()
-
+        # 5. Definir Rayo
+        ray_origin = pt_near_world
+        ray_dir = (pt_far_world - pt_near_world).normalized()
+        
         return ray_origin, ray_dir
 
-    def _get_ray_intersection(self, x_screen, y_screen, threshold=2.0):
-        if not self.full_nodes_data: return None
-
-        # 1. Obtener Rayo
-        ray_origin, ray_dir = self._get_mouse_ray(x_screen, y_screen)
+    def _get_clicked_item(self, x, y, node_thresh=15.0, frame_pixel_thresh=10.0):
+        """
+        x, y: Coordenadas del mouse en el widget.
+        node_thresh: Radio de clic para nodos (en píxeles aprox, si usamos proyección).
+        frame_pixel_thresh: Tolerancia en PÍXELES para seleccionar líneas.
+        """
+        w = self.width()
+        h = self.height()
         
-        # --- DEBUG: DIBUJAR EL RAYO EN 3D ---
-        # Dibujamos una linea desde la camara hasta 1000 unidades al fondo
-        p_start = ray_origin
-        p_end = ray_origin + ray_dir * 1000
-        # Actualizamos la línea roja de debug
-        self.debug_ray_line.setData(pos=np.array([
-            [p_start.x(), p_start.y(), p_start.z()],
-            [p_end.x(), p_end.y(), p_end.z()]
-        ], dtype=np.float32))
-        self.debug_ray_line.setVisible(True)
-        # ------------------------------------
-
-        closest_node_id = None
-        closest_dist_sq = float('inf')
-        threshold_sq = threshold * threshold
+        # 1. Preparar Matrices para Proyección (Mundo -> Pantalla)
+        m_view = self.viewMatrix()
+        m_proj = None
+        try:
+            m_proj = self.projectionMatrix()
+        except TypeError:
+            try:
+                r = (0, 0, w, h)
+                m_proj = self.projectionMatrix(region=r, viewport=r)
+            except Exception: pass
         
-        # --- CORRECCIÓN AQUÍ: Formato manual de string ---
-        print(f"\n--- DEBUG CLICK en ({x_screen}, {y_screen}) ---")
-        print(f"Rayo Origen: ({ray_origin.x():.2f}, {ray_origin.y():.2f}, {ray_origin.z():.2f})")
-        print(f"Rayo Dirección: ({ray_dir.x():.2f}, {ray_dir.y():.2f}, {ray_dir.z():.2f})")
-
-        for node in self.full_nodes_data:
-            nid, nx, ny, nz = node
-            P = QVector3D(float(nx), float(ny), float(nz))
+        if m_proj is None:
+            m_proj = QMatrix4x4()
+            m_proj.perspective(self.opts['fov'], w / h, 0.1, 5000.0)
             
-            # Vector nodo a origen
-            AP = P - ray_origin
-            proj = QVector3D.dotProduct(AP, ray_dir)
-            
-            if proj < 0: continue 
-
-            closest_point_on_ray = ray_origin + ray_dir * proj
-            dist_sq = (P - closest_point_on_ray).lengthSquared()
-            
-            # Calculamos distancia real para imprimir
-            real_dist = dist_sq ** 0.5
-            
-            # IMPRIMIR SOLO NODOS CERCANOS (< 50 unidades)
-            if real_dist < 50.0:
-                status = "DENTRO" if dist_sq < threshold_sq else "FUERA"
-                print(f"Nodo {nid}: Distancia al rayo = {real_dist:.4f} (Threshold: {threshold}) -> {status}")
-
-            if dist_sq < threshold_sq:
-                if dist_sq < closest_dist_sq:
-                    closest_dist_sq = dist_sq
-                    closest_node_id = nid
+        mvp = m_proj * m_view
         
-        if closest_node_id:
-            print(f"SELECCIONADO FINAL: Nodo {closest_node_id}")
-        else:
-            print("NINGUNA SELECCIÓN")
+        # Función auxiliar para proyectar 3D -> 2D (Pantalla)
+        def project_to_screen(bx, by, bz):
+            vec = QVector3D(float(bx), float(by), float(bz))
+            # map() aplica la matriz completa
+            screen_vec = mvp.map(vec)
+            # Convertir NDC (-1 a 1) a Coordenadas de Widget (0 a w, h a 0)
+            sx = (screen_vec.x() + 1.0) * w / 2.0
+            sy = (1.0 - screen_vec.y()) * h / 2.0 # Invertir Y
+            return sx, sy, screen_vec.z() # Z se usa para saber si está detrás de la cámara
+
+        print(f"\n--- CLICK SCREEN SPACE ({x}, {y}) ---")
+
+        # ---------------------------------------------------------
+        # 1. DETECCIÓN DE NODOS (Usando distancia en pantalla)
+        # ---------------------------------------------------------
+        closest_n = None
+        min_n_dist = float('inf')
+        sq_n_thresh = node_thresh**2 # Píxeles al cuadrado
+        
+        # Cacheamos posiciones de pantalla para usarlas en los frames luego
+        screen_coords_map = {} 
+
+        for n in self.full_nodes_data:
+            nid, nx, ny, nz = n
+            sx, sy, sz = project_to_screen(nx, ny, nz)
             
-        return closest_node_id
+            # Guardamos para frames (si está delante de la cámara)
+            if sz < 1.0: # 1.0 es el plano lejano en NDC habitual
+                screen_coords_map[nid] = (sx, sy)
+
+            # Distancia 2D simple (Pitágoras)
+            dist_sq = (x - sx)**2 + (y - sy)**2
+            
+            if dist_sq < sq_n_thresh and dist_sq < min_n_dist:
+                min_n_dist = dist_sq
+                closest_n = nid
+        
+        # Si le dimos a un nodo, retornamos (prioridad sobre frames)
+        if closest_n is not None:
+            print(f">> Nodo {closest_n} seleccionado (Dist: {min_n_dist**.5:.1f} px)")
+            return 'node', closest_n
+
+        # ---------------------------------------------------------
+        # 2. DETECCIÓN DE FRAMES (Proyección 2D Línea)
+        # ---------------------------------------------------------
+        closest_f = None
+        min_f_dist = float('inf')
+        sq_f_thresh = frame_pixel_thresh**2 # 10 px de tolerancia -> 100 sq
+        
+        print(f"Buscando en {len(self.full_elements_data)} frames (Screen Space)...")
+
+        for e in self.full_elements_data:
+            eid, n1, n2 = e
+            
+            # Solo procesar si ambos nodos son visibles y están mapeados
+            if n1 in screen_coords_map and n2 in screen_coords_map:
+                s1 = screen_coords_map[n1] # (x, y)
+                s2 = screen_coords_map[n2] # (x, y)
+                
+                # Distancia punto (mouse) a segmento (frame proyectado)
+                d_sq = dist_sq_point_to_segment_2d(x, y, s1[0], s1[1], s2[0], s2[1])
+                
+                if d_sq < 2500: # Debug solo cercanos (<50px)
+                    status = "HIT" if d_sq < sq_f_thresh else "MISS"
+                    print(f"Frame {eid}: {d_sq:.1f} px_sq (Req: {sq_f_thresh}) -> {status}")
+
+                if d_sq < sq_f_thresh and d_sq < min_f_dist:
+                    min_f_dist = d_sq
+                    closest_f = eid
+        
+        if closest_f is not None:
+            print(f">> Frame {closest_f} SELECCIONADO")
+            return 'frame', closest_f
+
+        return None, None
 
     def mousePressEvent(self, ev):
-        # 1. Intentar seleccionar un nodo con Ray-Casting
-        clicked_id = self._get_ray_intersection(ev.position().x(), ev.position().y())
-        
-        # 2. Manejo de estados
+        itype, iid = self._get_clicked_item(ev.position().x(), ev.position().y())
+        mod = ev.modifiers()
+        is_ctrl = mod & Qt.KeyboardModifier.ControlModifier
+
         if self.add_frame_mode:
-            if clicked_id is not None:
+            if itype == 'node':
                 if self.temp_first_node_id is None:
-                    # Primer clic: Inicio
-                    self.temp_first_node_id = clicked_id
-                    self._refresh_scatter_colors() 
-                else:
-                    # Segundo clic: Fin
-                    if clicked_id != self.temp_first_node_id:
-                        self.createFrameSignal.emit(self.temp_first_node_id, clicked_id)
-                    # Resetear para permitir el siguiente frame
+                    self.temp_first_node_id = iid
+                elif iid != self.temp_first_node_id:
+                    self.createFrameSignal.emit(self.temp_first_node_id, iid)
                     self.temp_first_node_id = None
-                    self._refresh_scatter_colors()
+                self._refresh_scene_graphics()
                 ev.accept()
             else:
-                # Clic en el vacío: Deseleccionar temporal, pero mantener modo Add Frame
-                # Pasar evento al padre para permitir rotar la cámara
-                if self.temp_first_node_id is not None:
+                if self.temp_first_node_id: 
                     self.temp_first_node_id = None
-                    self._refresh_scatter_colors()
+                    self._refresh_scene_graphics()
                 super().mousePressEvent(ev)
-                
         else:
-            # Modo Selección Normal
-            if clicked_id is not None:
-                modifiers = ev.modifiers()
-                is_ctrl = modifiers & Qt.KeyboardModifier.ControlModifier
+            if itype:
+                if itype == 'node':
+                    if is_ctrl: 
+                        if iid in self.selected_node_ids: self.selected_node_ids.remove(iid)
+                        else: self.selected_node_ids.add(iid)
+                    else:
+                        self.selected_node_ids = {iid}
+                        self.selected_frame_ids.clear()
+                elif itype == 'frame':
+                    if is_ctrl:
+                        if iid in self.selected_frame_ids: self.selected_frame_ids.remove(iid)
+                        else: self.selected_frame_ids.add(iid)
+                    else:
+                        self.selected_frame_ids = {iid}
+                        self.selected_node_ids.clear()
                 
-                if is_ctrl:
-                    if clicked_id in self.selected_ids: self.selected_ids.remove(clicked_id)
-                    else: self.selected_ids.add(clicked_id)
-                else:
-                    self.selected_ids = {clicked_id}
-                
-                self._refresh_scatter_colors()
-                self.nodeSelectionChanged.emit(self.selected_ids)
+                self._refresh_scene_graphics()
+                self.nodeSelectionChanged.emit(self.selected_node_ids)
+                self.frameSelectionChanged.emit(self.selected_frame_ids)
                 ev.accept()
             else:
-                # Clic en el vacío (sin Ctrl) limpia selección
-                modifiers = ev.modifiers()
-                if not (modifiers & Qt.KeyboardModifier.ControlModifier):
-                    if self.selected_ids:
-                        self.selected_ids.clear()
-                        self.nodeSelectionChanged.emit(self.selected_ids)
-                        self._refresh_scatter_colors()
-                
-                # Permitir interacción nativa (rotar cámara)
+                if not is_ctrl:
+                    self.selected_node_ids.clear()
+                    self.selected_frame_ids.clear()
+                    self._refresh_scene_graphics()
+                    self.nodeSelectionChanged.emit(self.selected_node_ids)
+                    self.frameSelectionChanged.emit(self.selected_frame_ids)
                 super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
-        # Mantener lógica original de Snap para visualización, 
-        # pero usamos el ray casting para detectar proximidad
         super().mouseMoveEvent(ev)
-        
         w, h = self.width(), self.height()
         if w <= 0: return
-
-        ray_origin, ray_dir = self._get_mouse_ray(ev.position().x(), ev.position().y())
         
-        closest_node_dist = 9999
-        snapped_node = None
+        orig, direction = self._get_mouse_ray(ev.position().x(), ev.position().y())
+        closest, snap_node = 9999, None
         
-        # Snap visual (más permisivo que el click)
-        for node in self.full_nodes_data:
-            nid, nx, ny, nz = node
-            P = QVector3D(float(nx), float(ny), float(nz))
-            AP = P - ray_origin
-            proj = QVector3D.dotProduct(AP, ray_dir)
+        for n in self.full_nodes_data:
+            P = QVector3D(float(n[1]), float(n[2]), float(n[3]))
+            proj = QVector3D.dotProduct(P - orig, direction)
             if proj < 0: continue
-            closest_point_on_ray = ray_origin + ray_dir * proj
-            dist_3d = (P - closest_point_on_ray).length()
-            
-            if dist_3d < 2.0 and dist_3d < closest_node_dist:
-                closest_node_dist = dist_3d
-                snapped_node = node
+            dist = (P - (orig + direction*proj)).length()
+            if dist < 5.0 and dist < closest: # Snap visual radius
+                closest = dist; snap_node = n
         
-        if snapped_node:
-            self.mouseMovedSignal.emit(snapped_node[1], snapped_node[2], snapped_node[3], True)
-        else:
-            # Proyección al plano Z=0 para referencia
-            if abs(ray_dir.z()) > 1e-6:
-                t = -ray_origin.z() / ray_dir.z()
-                intersection = ray_origin + ray_dir * t
-                self.mouseMovedSignal.emit(intersection.x(), intersection.y(), intersection.z(), False)
+        if snap_node:
+            self.mouseMovedSignal.emit(snap_node[1], snap_node[2], snap_node[3], True)
+        elif abs(direction.z()) > 1e-6:
+            t = -orig.z() / direction.z()
+            inte = orig + direction * t
+            self.mouseMovedSignal.emit(inte.x(), inte.y(), inte.z(), False)
 
     def set_view_direction(self, view_name: str):
         center = self.opts['center']
@@ -709,7 +781,6 @@ class CentralViewContainer(QWidget):
         super().resizeEvent(event)
         self.view_toolbar.move(self.width() - self.view_toolbar.width() - 10, 10)
         self.view_toolbar.raise_()
-        
         cw, ch = self.coord_status.width(), self.coord_status.height()
         self.coord_status.move(int((self.width() - cw)/2), self.height() - ch - 20)
         self.coord_status.raise_()
