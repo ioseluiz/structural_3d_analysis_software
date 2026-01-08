@@ -7,9 +7,9 @@ from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QVector3D, QMatrix4x4,
 import numpy as np
 import pyqtgraph.opengl as gl
 from pyqtgraph.opengl import GLViewWidget
+import math # Necesario para el grid logarítmico
 
-# --- SISTEMA DE TEXTO VECTORIAL ---
-# Definimos los trazos para dibujar números y letras
+# --- SISTEMA DE TEXTO VECTORIAL (Sin cambios) ---
 VECTOR_FONT_DEFS = {
     '0': [[0,0], [1,0], [1,2], [0,2], [0,0]],
     '1': [[0.5,0], [0.5,2]],
@@ -25,14 +25,10 @@ VECTOR_FONT_DEFS = {
     'Y': [[0,2], [0.5,1], [1,2], [0.5,1], [0.5,0]], 
     'Z': [[0,2], [1,2], [0,0], [1,0]],
     '-': [[0,1], [1,1]],
-    'F': [[0,0], [0,2], [1,2], [0,2], [0,1], [0.8,1]] # Letra F para Frames
+    'F': [[0,0], [0,2], [1,2], [0,2], [0,1], [0.8,1]] 
 }
 
 def generate_vector_text(text, origin, scale=1.0, color=(0,0,0,1), width=1):
-    """
-    Genera texto vectorial compatible con OpenGL (sin usar NaNs).
-    Usa width=1 para asegurar visibilidad en Windows.
-    """
     points = []
     ox, oy, oz = origin
     cursor_x = 0
@@ -54,11 +50,9 @@ def generate_vector_text(text, origin, scale=1.0, color=(0,0,0,1), width=1):
         return None
 
     pos = np.array(points, dtype=np.float32)
-    # IMPORTANTE: width=1 y antialias=True para máxima compatibilidad
     item = gl.GLLinePlotItem(pos=pos, color=color, width=1, antialias=True, mode='lines') 
     return item
 
-# --- Funciones Auxiliares ---
 def create_color_icon(color: QColor, text: str = "") -> QIcon:
     pixmap = QPixmap(32, 32)
     pixmap.fill(color)
@@ -69,7 +63,7 @@ def create_color_icon(color: QColor, text: str = "") -> QIcon:
         painter.end()
     return QIcon(pixmap)
 
-# --- PANELES Y WIDGETS ---
+# --- PANELES Y WIDGETS AUXILIARES ---
 
 class WorkTreeWidget(QWidget):
     itemSelected = pyqtSignal(str) 
@@ -83,8 +77,8 @@ class WorkTreeWidget(QWidget):
         
         self.root = QTreeWidgetItem(self.tree, ["Document"])
         QTreeWidgetItem(self.root, ["Geometry"])
-        QTreeWidgetItem(self.root, ["Materials"]) # Nuevo nodo Materiales
-        QTreeWidgetItem(self.root, ["Sections"])  # Nuevo nodo Secciones
+        QTreeWidgetItem(self.root, ["Materials"]) 
+        QTreeWidgetItem(self.root, ["Sections"])  
         QTreeWidgetItem(self.root, ["Elements"]) 
         
         self.root.setExpanded(True)
@@ -186,7 +180,6 @@ class MaterialTableWidget(QWidget):
     def update_data(self, materials_list):
         self.table.setRowCount(len(materials_list))
         for row, mat in enumerate(materials_list):
-            # mat: (id, name, E, nu, rho)
             self.table.setItem(row, 0, QTableWidgetItem(str(mat[0])))
             self.table.setItem(row, 1, QTableWidgetItem(str(mat[1])))
             self.table.setItem(row, 2, QTableWidgetItem(f"{mat[2]:.2f}"))
@@ -208,7 +201,6 @@ class TerminalWidget(QWidget):
 
     def print_message(self, message: str):
         self.text_area.append(message)
-        # Auto-scroll al final
         cursor = self.text_area.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.text_area.setTextCursor(cursor)
@@ -256,11 +248,11 @@ class Viewport3DWidget(GLViewWidget):
         super().__init__()
         self.setCameraPosition(distance=150, elevation=30, azimuth=45)
         self.setBackgroundColor('w')
+        # Habilitamos el tracking, pero gestionaremos el clic manualmente
         self.setMouseTracking(True)
 
         self.full_nodes_data = [] 
         self.full_elements_data = []
-
         self.selected_ids = set()
         
         # VISIBILITY FLAGS
@@ -276,10 +268,10 @@ class Viewport3DWidget(GLViewWidget):
         self.frame_text_items = [] 
         self.axes_items = []
 
-        # Grid
+        # --- GRID DINÁMICO ---
         self.grid = gl.GLGridItem()
-        self.grid.setSize(2000, 2000, 0)
-        self.grid.setSpacing(50, 50, 0)
+        self.grid.setSize(100, 100, 0)
+        self.grid.setSpacing(10, 10, 0)
         self.grid.setColor((50, 50, 50, 40))
         self.grid.setGLOptions('translucent')
         self.addItem(self.grid)
@@ -292,10 +284,16 @@ class Viewport3DWidget(GLViewWidget):
         self.frames_item = gl.GLLinePlotItem(pos=np.zeros((0,3)), color=(0.4, 0.4, 0.4, 1), width=2, mode='lines', antialias=True)
         self.addItem(self.frames_item)
 
-        # Item para Nodos (Puntos) -> Tamaño ajustado a 10
-        self.scatter = gl.GLScatterPlotItem(pos=np.zeros((0, 3)), size=10, color=(0, 0, 1, 1), pxMode=True)
+        # Item para Nodos (Puntos)
+        self.scatter = gl.GLScatterPlotItem(pos=np.zeros((0, 3)), size=12, color=(0, 0, 1, 1), pxMode=True)
         self.scatter.setGLOptions('translucent')
         self.addItem(self.scatter)
+
+        # --- DEBUG: Rayo Visual ---
+        # Una línea roja brillante que nos mostrará por dónde "viaja" el clic
+        self.debug_ray_line = gl.GLLinePlotItem(pos=np.zeros((2,3)), color=(1, 0, 1, 1), width=3, antialias=True)
+        self.addItem(self.debug_ray_line)
+        self.debug_ray_line.setVisible(False) # Oculto por defecto
 
     def set_add_frame_mode(self, active: bool):
         self.add_frame_mode = active
@@ -303,7 +301,7 @@ class Viewport3DWidget(GLViewWidget):
         self._refresh_scatter_colors()
 
     def _draw_vector_axes(self):
-        L, W = 50, 1 # Width=1 para compatibilidad
+        L, W = 50, 1 
         
         xaxis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [L,0,0]]), color=(1,0,0,1), width=W, antialias=True)
         yaxis = gl.GLLinePlotItem(pos=np.array([[0,0,0], [0,L,0]]), color=(0,0.6,0,1), width=W, antialias=True)
@@ -319,6 +317,44 @@ class Viewport3DWidget(GLViewWidget):
         if txt_y: self.addItem(txt_y); self.axes_items.append(txt_y)
         txt_z = generate_vector_text("Z", (0, 0, L+5), scale=2.5, color=(0,0,1,1))
         if txt_z: self.addItem(txt_z); self.axes_items.append(txt_z)
+
+    # --- NUEVA LÓGICA DE GRID DINÁMICO ---
+    def auto_adjust_grid(self, bounds):
+        """
+        Ajusta el tamaño del Grid y su espaciado basándose en los límites del modelo.
+        bounds: tupla (min_x, max_x, min_y, max_y, min_z, max_z)
+        """
+        if not bounds: return
+
+        min_x, max_x, min_y, max_y, _, _ = bounds
+        
+        # Calcular dimensiones del modelo
+        width = max_x - min_x
+        height = max_y - min_y
+        max_dim = max(width, height, 1.0) 
+        
+        # Grid size un poco más grande
+        grid_size = max_dim * 3.0
+        if grid_size < 100: grid_size = 100 # Mínimo 100 unidades
+        
+        # Calcular espaciado logarítmico (1, 10, 100, 1000...)
+        exponent = math.floor(math.log10(max_dim)) if max_dim > 0 else 1
+        spacing = 10 ** (exponent - 1) 
+        
+        # Si el espaciado es muy denso, lo aumentamos
+        if max_dim / spacing > 20:
+            spacing *= 5
+            
+        self.grid.setSize(grid_size, grid_size, 0)
+        self.grid.setSpacing(spacing, spacing, 0)
+        
+        # Centrar el grid aproximadamente
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+        
+        # Reseteamos transformaciones y movemos
+        self.grid.resetTransform()
+        self.grid.translate(center_x, center_y, 0)
 
     # --- TOGGLES DE VISIBILIDAD ---
     def toggle_axes(self, show: bool):
@@ -366,7 +402,6 @@ class Viewport3DWidget(GLViewWidget):
                 c1 = node_map[n1]
                 c2 = node_map[n2]
                 
-                # Punto Medio
                 mid_x = (c1[0] + c2[0]) / 2.0
                 mid_y = (c1[1] + c2[1]) / 2.0
                 mid_z = (c1[2] + c2[2]) / 2.0
@@ -411,103 +446,203 @@ class Viewport3DWidget(GLViewWidget):
             return
 
         coords = np.array([n[1:] for n in self.full_nodes_data], dtype=np.float32)
+        # Color azul por defecto
         colors = np.array([[0, 0, 1, 1] for _ in range(len(coords))], dtype=np.float32)
         
         for i, node in enumerate(self.full_nodes_data):
             nid = node[0]
             if nid in self.selected_ids:
-                colors[i] = [1, 0, 0, 1] 
+                colors[i] = [1, 0, 0, 1] # Rojo para selección
             elif nid == self.temp_first_node_id:
-                colors[i] = [0, 1, 0, 1] # Verde brillante (Primer nodo del frame)
+                colors[i] = [0, 1, 0, 1] # Verde para inicio de frame
         
-        self.scatter.setData(pos=coords, size=10, color=colors, pxMode=True)
+        self.scatter.setData(pos=coords, size=12, color=colors, pxMode=True)
         self.update()
 
-    def mousePressEvent(self, ev):
-        super().mousePressEvent(ev)
-        if not self.full_nodes_data: return
-        
-        # --- MEJORA: DETECCIÓN DE CLICS MÁS PRECISA ---
-        w, h = self.width(), self.height()
+    # --- LÓGICA DE RAY-CASTING Y EVENTOS ---
+    
+    def _get_mouse_ray(self, x, y):
+        """
+        Calcula el rayo en coordenadas del mundo.
+        Intenta obtener la matriz de proyección EXACTA del widget para evitar errores de Aspect Ratio.
+        """
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0: 
+            return QVector3D(0,0,0), QVector3D(0,0,1)
+
+        # 1. Matriz de Vista (Siempre es estándar)
         m_view = self.viewMatrix()
-        m_proj = QMatrix4x4()
-        m_proj.perspective(60.0, w / h, 0.1, 5000.0)
+
+        # 2. Matriz de Proyección (INTENTO ROBUSTO)
+        # Intentamos llamar a projectionMatrix adaptándonos a la firma del método
+        m_proj = None
+        try:
+            # Intento 1: Estándar (sin argumentos o por defecto)
+            m_proj = self.projectionMatrix()
+        except TypeError:
+            try:
+                # Intento 2: Firma con region y viewport (Tu caso probable)
+                # region=(x, y, w, h), viewport=(x, y, w, h)
+                r = (0, 0, w, h)
+                m_proj = self.projectionMatrix(region=r, viewport=r)
+            except Exception as e:
+                print(f"Error obteniendo projectionMatrix: {e}")
+        
+        # 3. Fallback Manual (Solo si todo falla)
+        if m_proj is None:
+            print("WARNING: Usando cálculo manual de matriz (puede ser impreciso)")
+            m_proj = QMatrix4x4()
+            m_proj.perspective(self.opts['fov'], w / h, 0.1, 5000.0)
+        
+        # 4. Inversión MVP
         mvp = m_proj * m_view
+        inv_mvp, invertible = mvp.inverted()
         
-        # Usamos ev.position() para coordenadas flotantes precisas
-        click_x = ev.position().x()
-        click_y = ev.position().y()
+        if not invertible:
+            return QVector3D(0,0,0), QVector3D(0,0,1)
+
+        # 5. Cálculo del Rayo
+        x_ndc = (2.0 * x) / w - 1.0
+        y_ndc = 1.0 - (2.0 * y) / h 
         
-        closest_dist = 50.0 # Umbral de clic (pixeles)
-        clicked_id = None
+        ray_origin = self.cameraPosition()
         
+        point_on_far_plane_ndc = QVector3D(x_ndc, y_ndc, 1.0)
+        point_on_far_plane_world = inv_mvp.map(point_on_far_plane_ndc)
+        
+        ray_dir = (point_on_far_plane_world - ray_origin).normalized()
+
+        return ray_origin, ray_dir
+
+    def _get_ray_intersection(self, x_screen, y_screen, threshold=2.0):
+        if not self.full_nodes_data: return None
+
+        # 1. Obtener Rayo
+        ray_origin, ray_dir = self._get_mouse_ray(x_screen, y_screen)
+        
+        # --- DEBUG: DIBUJAR EL RAYO EN 3D ---
+        # Dibujamos una linea desde la camara hasta 1000 unidades al fondo
+        p_start = ray_origin
+        p_end = ray_origin + ray_dir * 1000
+        # Actualizamos la línea roja de debug
+        self.debug_ray_line.setData(pos=np.array([
+            [p_start.x(), p_start.y(), p_start.z()],
+            [p_end.x(), p_end.y(), p_end.z()]
+        ], dtype=np.float32))
+        self.debug_ray_line.setVisible(True)
+        # ------------------------------------
+
+        closest_node_id = None
+        closest_dist_sq = float('inf')
+        threshold_sq = threshold * threshold
+        
+        # --- CORRECCIÓN AQUÍ: Formato manual de string ---
+        print(f"\n--- DEBUG CLICK en ({x_screen}, {y_screen}) ---")
+        print(f"Rayo Origen: ({ray_origin.x():.2f}, {ray_origin.y():.2f}, {ray_origin.z():.2f})")
+        print(f"Rayo Dirección: ({ray_dir.x():.2f}, {ray_dir.y():.2f}, {ray_dir.z():.2f})")
+
         for node in self.full_nodes_data:
             nid, nx, ny, nz = node
-            screen_vec = mvp.map(QVector3D(float(nx), float(ny), float(nz)))
+            P = QVector3D(float(nx), float(ny), float(nz))
             
-            sx = (screen_vec.x() + 1.0) * w / 2.0
-            sy = (1.0 - screen_vec.y()) * h / 2.0
+            # Vector nodo a origen
+            AP = P - ray_origin
+            proj = QVector3D.dotProduct(AP, ray_dir)
             
-            dist = ((click_x - sx)**2 + (click_y - sy)**2)**0.5
-            
-            if dist < closest_dist:
-                closest_dist = dist
-                clicked_id = nid
+            if proj < 0: continue 
 
-        # LÓGICA DE INTERACCIÓN
+            closest_point_on_ray = ray_origin + ray_dir * proj
+            dist_sq = (P - closest_point_on_ray).lengthSquared()
+            
+            # Calculamos distancia real para imprimir
+            real_dist = dist_sq ** 0.5
+            
+            # IMPRIMIR SOLO NODOS CERCANOS (< 50 unidades)
+            if real_dist < 50.0:
+                status = "DENTRO" if dist_sq < threshold_sq else "FUERA"
+                print(f"Nodo {nid}: Distancia al rayo = {real_dist:.4f} (Threshold: {threshold}) -> {status}")
+
+            if dist_sq < threshold_sq:
+                if dist_sq < closest_dist_sq:
+                    closest_dist_sq = dist_sq
+                    closest_node_id = nid
+        
+        if closest_node_id:
+            print(f"SELECCIONADO FINAL: Nodo {closest_node_id}")
+        else:
+            print("NINGUNA SELECCIÓN")
+            
+        return closest_node_id
+
+    def mousePressEvent(self, ev):
+        # 1. Intentar seleccionar un nodo con Ray-Casting
+        clicked_id = self._get_ray_intersection(ev.position().x(), ev.position().y())
+        
+        # 2. Manejo de estados
         if self.add_frame_mode:
             if clicked_id is not None:
                 if self.temp_first_node_id is None:
-                    # Primer clic: Seleccionar inicio
+                    # Primer clic: Inicio
                     self.temp_first_node_id = clicked_id
                     self._refresh_scatter_colors() 
                 else:
-                    # Segundo clic: Crear frame
+                    # Segundo clic: Fin
                     if clicked_id != self.temp_first_node_id:
                         self.createFrameSignal.emit(self.temp_first_node_id, clicked_id)
-                    # Reiniciar ciclo
+                    # Resetear para permitir el siguiente frame
                     self.temp_first_node_id = None
                     self._refresh_scatter_colors()
+                ev.accept()
             else:
-                # Clic en el vacío cancela
-                self.temp_first_node_id = None
-                self._refresh_scatter_colors()
+                # Clic en el vacío: Deseleccionar temporal, pero mantener modo Add Frame
+                # Pasar evento al padre para permitir rotar la cámara
+                if self.temp_first_node_id is not None:
+                    self.temp_first_node_id = None
+                    self._refresh_scatter_colors()
+                super().mousePressEvent(ev)
+                
         else:
             # Modo Selección Normal
-            modifiers = ev.modifiers()
-            is_ctrl = modifiers & Qt.KeyboardModifier.ControlModifier
             if clicked_id is not None:
+                modifiers = ev.modifiers()
+                is_ctrl = modifiers & Qt.KeyboardModifier.ControlModifier
+                
                 if is_ctrl:
                     if clicked_id in self.selected_ids: self.selected_ids.remove(clicked_id)
                     else: self.selected_ids.add(clicked_id)
                 else:
                     self.selected_ids = {clicked_id}
-            elif not is_ctrl:
-                self.selected_ids.clear()
-            self._refresh_scatter_colors()
-            self.nodeSelectionChanged.emit(self.selected_ids)
-
-    def _get_mouse_ray(self, x, y):
-        w, h = self.width(), self.height()
-        m_view = self.viewMatrix()
-        m_proj = QMatrix4x4()
-        m_proj.perspective(60.0, w / h, 0.1, 5000.0)
-        inv_mvp = (m_view * m_proj).inverted()[0]
-        x_ndc = (2.0 * x) / w - 1.0
-        y_ndc = 1.0 - (2.0 * y) / h
-        pt_near = inv_mvp.map(QVector3D(x_ndc, y_ndc, -1.0))
-        pt_far = inv_mvp.map(QVector3D(x_ndc, y_ndc, 1.0))
-        return pt_near, (pt_far - pt_near).normalized()
+                
+                self._refresh_scatter_colors()
+                self.nodeSelectionChanged.emit(self.selected_ids)
+                ev.accept()
+            else:
+                # Clic en el vacío (sin Ctrl) limpia selección
+                modifiers = ev.modifiers()
+                if not (modifiers & Qt.KeyboardModifier.ControlModifier):
+                    if self.selected_ids:
+                        self.selected_ids.clear()
+                        self.nodeSelectionChanged.emit(self.selected_ids)
+                        self._refresh_scatter_colors()
+                
+                # Permitir interacción nativa (rotar cámara)
+                super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
+        # Mantener lógica original de Snap para visualización, 
+        # pero usamos el ray casting para detectar proximidad
         super().mouseMoveEvent(ev)
+        
         w, h = self.width(), self.height()
         if w <= 0: return
 
         ray_origin, ray_dir = self._get_mouse_ray(ev.position().x(), ev.position().y())
+        
         closest_node_dist = 9999
         snapped_node = None
         
+        # Snap visual (más permisivo que el click)
         for node in self.full_nodes_data:
             nid, nx, ny, nz = node
             P = QVector3D(float(nx), float(ny), float(nz))
@@ -516,13 +651,15 @@ class Viewport3DWidget(GLViewWidget):
             if proj < 0: continue
             closest_point_on_ray = ray_origin + ray_dir * proj
             dist_3d = (P - closest_point_on_ray).length()
-            if dist_3d < 5.0 and dist_3d < closest_node_dist:
+            
+            if dist_3d < 2.0 and dist_3d < closest_node_dist:
                 closest_node_dist = dist_3d
                 snapped_node = node
         
         if snapped_node:
             self.mouseMovedSignal.emit(snapped_node[1], snapped_node[2], snapped_node[3], True)
         else:
+            # Proyección al plano Z=0 para referencia
             if abs(ray_dir.z()) > 1e-6:
                 t = -ray_origin.z() / ray_dir.z()
                 intersection = ray_origin + ray_dir * t

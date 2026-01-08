@@ -4,7 +4,7 @@ from PyQt6.QtGui import QAction
 
 from app.models.document_model import DocumentModel
 from app.views.main_window import MainWindow
-from app.views.dialogs import AddNodeDialog, AddMaterialDialog # Importar nuevo dialogo
+from app.views.dialogs import AddNodeDialog, AddMaterialDialog
 
 class MainController:
     def __init__(self):
@@ -37,7 +37,7 @@ class MainController:
         self.window.view_node_ids_action.triggered.connect(self.toggle_node_ids)
         self.window.view_frame_ids_action.triggered.connect(self.toggle_frame_ids)
         
-        # 3. NUEVO: Menu Define Connections
+        # 3. Menu Define Connections
         self.window.define_material_action.triggered.connect(self.open_add_material_dialog)
 
         # 4. General Connections
@@ -47,21 +47,14 @@ class MainController:
         self.window.central_container.viewport.createFrameSignal.connect(self.on_create_frame)
         self.window.node_table.selectionChanged.connect(self.on_table_selection)
 
-    # --- NUEVA LÓGICA DE MATERIALES ---
+    # --- MATERIALS ---
     def open_add_material_dialog(self):
         dialog = AddMaterialDialog(self.window)
         if dialog.exec():
-            # Obtener datos del dialogo
             name, e, nu, rho = dialog.get_data()
-            
-            # Guardar en modelo
             mat_id = self.model.add_material(name, e, nu, rho)
-            
-            # Feedback
             msg = f">> Material Added: ID {mat_id} [{name}] E={e} v={nu}"
             self.window.terminal.print_message(msg)
-            
-            # Si el panel de materiales está visible, actualizarlo
             if self.window.material_table.isVisible():
                 self.window.material_table.update_data(self.model.get_materials_data())
 
@@ -105,7 +98,7 @@ class MainController:
             elements = self.model.get_elements_data()
             self.window.element_table.update_data(elements)
             
-        elif item_name == "Materials": # <--- NUEVO CASO
+        elif item_name == "Materials": 
             self.window.set_right_panel("Materials")
             materials = self.model.get_materials_data()
             self.window.material_table.update_data(materials)
@@ -158,6 +151,10 @@ class MainController:
             msg = f">> Joint Added: ID {node_id} at (X: {x:.2f}, Y: {y:.2f}, Z: {z:.2f})"
             self.window.terminal.print_message(msg)
             self._refresh_all_views()
+            
+            # --- Ajustar Grid Automáticamente ---
+            bounds = self.model.get_model_bounds()
+            self.window.central_container.viewport.auto_adjust_grid(bounds)
 
     def _refresh_all_views(self):
         coords, full_data = self.model.get_nodes_data()
@@ -166,7 +163,10 @@ class MainController:
         self.window.central_container.viewport.update_scene_data(full_data, elements)
         self.window.node_table.update_data(full_data)
         self.window.element_table.update_data(elements)
-        # No hace falta refrescar tabla materiales aqui porque no cambian desde el viewport
+        
+        # Opcional: Re-ajustar grid también al refrescar (útil al borrar nodos)
+        bounds = self.model.get_model_bounds()
+        self.window.central_container.viewport.auto_adjust_grid(bounds)
 
     def run(self):
         self.window.show()
