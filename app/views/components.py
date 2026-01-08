@@ -410,19 +410,41 @@ class Viewport3DWidget(GLViewWidget):
     def auto_adjust_grid(self, bounds):
         if not bounds: return
         min_x, max_x, min_y, max_y, _, _ = bounds
-        max_dim = max(max_x - min_x, max_y - min_y, 1.0)
         
-        grid_size = max_dim * 3.0
-        if grid_size < 100: grid_size = 100
+        # Calcular dimensiones del modelo
+        width = max_x - min_x
+        height = max_y - min_y
+        max_dim = max(width, height) # Dimensión real sin forzar 1.0 todavía
         
-        exponent = math.floor(math.log10(max_dim)) if max_dim > 0 else 1
-        spacing = 10 ** (exponent - 1) 
-        if max_dim / spacing > 20: spacing *= 5
+        # CASO 1: Modelo vacío, puntual o muy pequeño (< 10 unidades)
+        # Usamos un Grid "Estándar" de 100x100 con cuadros de 10
+        if max_dim < 10.0:
+            grid_size = 100.0
+            spacing = 10.0
+        
+        # CASO 2: Modelo normal o grande
+        else:
+            grid_size = max_dim * 3.0
             
+            # Calcular espaciado logarítmico (1, 10, 100...) basado en el tamaño real
+            exponent = math.floor(math.log10(max_dim))
+            spacing = 10 ** (exponent - 1)
+            
+            # Si salen demasiadas líneas (>20), aumentamos el espaciado
+            if max_dim / spacing > 20:
+                spacing *= 5
+                
+            # Limpieza final: Evitar que el grid sea más pequeño que 100 visualmente
+            if grid_size < 100: grid_size = 100
+
         self.grid.setSize(grid_size, grid_size, 0)
         self.grid.setSpacing(spacing, spacing, 0)
+        
+        # Centrar el grid en el modelo
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
         self.grid.resetTransform()
-        self.grid.translate((min_x + max_x)/2, (min_y + max_y)/2, 0)
+        self.grid.translate(center_x, center_y, 0)
 
     # --- TOGGLES ---
     def toggle_axes(self, show: bool):
